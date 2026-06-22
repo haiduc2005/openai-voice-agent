@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenAI Voice & Document Agent</title>
+    <style>
+        body { font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', sans-serif; margin: 0; background: url('/images/hero-ai.png') no-repeat center center/cover fixed; background-color: #0f172a; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+        .agent-container { background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.2); padding: 40px; border-radius: 16px; width: 100%; max-width: 650px; color: #fff; box-shadow: 0 20px 50px rgba(0,0,0,0.3); text-align: center; }
+        h1 { font-size: 2rem; margin-bottom: 5px; letter-spacing: 1px; text-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+        .subtitle { color: #cbd5e1; font-size: 0.95rem; margin-bottom: 30px; }
+        .status-badge { display: inline-block; padding: 6px 16px; border-radius: 20px; font-size: 0.85rem; font-weight: bold; background: rgba(0, 0, 0, 0.4); margin-bottom: 25px; border: 1px solid rgba(255,255,255,0.1); }
+        .status-badge.active { background: #10b981; animation: pulse 2s infinite; }
+        .controls { display: flex; justify-content: center; gap: 15px; margin-bottom: 25px; }
+        button { padding: 12px 28px; font-size: 1rem; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; transition: all 0.2s ease; }
+        .btn-voice { background: #2563eb; color: #fff; }
+        .btn-voice:hover { background: #1d4ed8; }
+        .btn-stop { background: #ef4444; color: #fff; display: none; }
+        .btn-stop:hover { background: #dc2626; }
+        .text-input-group { display: flex; background: rgba(0, 0, 0, 0.2); border-radius: 8px; padding: 5px; border: 1px solid rgba(255,255,255,0.1); }
+        input[type="text"] { flex: 1; background: transparent; border: none; padding: 12px; color: #fff; font-size: 1rem; outline: none; }
+        .btn-send { background: rgba(255,255,255,0.2); color: #fff; padding: 0 20px; border-radius: 6px; }
+        .btn-send:hover { background: rgba(255,255,255,0.3); }
+        .download-center { margin-top: 30px; background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; border-radius: 12px; padding: 20px; display: none; text-align: left; animation: slideUp 0.3s ease; }
+        .download-title { font-weight: bold; color: #10b981; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+        .download-link { display: inline-block; background: #10b981; color: #fff; text-decoration: none; padding: 10px 20px; border-radius: 6px; font-weight: bold; font-size: 0.9rem; margin-top: 10px; transition: background 0.2s; }
+        .download-link:hover { background: #059669; }
+        @keyframes pulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
+        @keyframes slideUp { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    </style>
+</head>
+<body>
+    <div class="agent-container">
+        <h1>AI 音声アシスタント</h1>
+        <div class="subtitle">OpenAI Voice Agent リアルタイム接続 • スマートファイルローカル生成</div>
+        <div class="status-badge" id="statusBadge">未接続</div>
+        <div class="controls">
+            <button class="btn-voice" id="startBtn" onclick="startSession()">音声通話を開始</button>
+            <button class="btn-stop" id="stopBtn" onclick="stopSession()">切断</button>
+        </div>
+        <div class="text-input-group">
+            <input type="text" id="textMsg" placeholder="ここからテキストで要望を入力することもできます...">
+            <button class="btn-send" onclick="sendTextMessage()">送信</button>
+        </div>
+        <div class="download-center" id="downloadCenter">
+            <div class="download-title">レポート生成成功！準備ができました</div>
+            <div id="pdfMeta" style="font-size: 0.85rem; color: #e2e8f0;">ファイルはローカル環境に保存されました。</div>
+            <a href="#" class="download-link" id="pdfDownloadBtn" target="_blank">PDFを閲覧 / ダウンロード</a>
+        </div>
+    </div>
+    <audio id="remoteAudio" autoplay></audio>
+
+    <script>
+        let peerConnection = null;
+        let dataChannel = null;
+
+        async function startSession() {
+            updateStatus("音声アシスタントを呼び出しています...", false);
+            try {
+                const res = await fetch('/api/session');
+                if (!res.ok) throw new Error("セッションデータの取得に失敗しました");
+                const sessionData = await res.json();
+                
+                // トークンの抽出
+                const EPHEMERAL_KEY = sessionData.value || (sessionData.client_secret && sessionData.client_secret.value);
+                if (!EPHEMERAL_KEY) throw new Error("一時トークンが存在しません");
+
+                peerConnection = new RTCPeerConnection();
+                peerConnection.ontrack = e => {
+                    document.getElementById('remoteAudio').srcObject = e.streams[0];
+                };
+
+                const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                peerConnection.addTrack(localStream.getTracks()[0]);
+
+                dataChannel = peerConnection.createDataChannel("oai-events");
+                setupDataChannel();
+
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                // GA最新仕様: トークンにモデル情報が含まれるため、純粋なエンドポイントにPOST
+                const sdpResponse = await fetch(`https://api.openai.com/v1/realtime/calls`, {
+                    method: "POST",
+                    body: offer.sdp,
+                    headers: {
+                        "Authorization": `Bearer ${EPHEMERAL_KEY}`,
+                        "Content-Type": "application/sdp"
+                    }
+                });
+
+                if (!sdpResponse.ok) {
+                    // OpenAIが返してきた400エラーの「本当の理由」をテキストとして抽出してログに出す
+                    const errorText = await sdpResponse.text();
+                    console.error("400エラーの真実:", errorText);
+                    throw new Error(`SDP拒否: HTTP ${sdpResponse.status}`);
+                }
+
+                const answer = { type: "answer", sdp: await sdpResponse.text() };
+                await peerConnection.setRemoteDescription(answer);
+
+                document.getElementById('startBtn').style.display = 'none';
+                document.getElementById('stopBtn').style.display = 'inline-block';
+                updateStatus("通話中：いつでも話しかけるか、ファイル生成を指示してください", true);
+
+            } catch (err) {
+                console.error("接続エラー詳細:", err);
+                updateStatus("接続失敗：マイク権限または通信状態を確認してください", false);
+            }
+        }
+
+        function setupDataChannel() {
+            dataChannel.onmessage = async (e) => {
+                try {
+                    const serverEvent = JSON.parse(e.data);
+
+                    if (serverEvent.type === 'response.function_call_arguments.done') {
+                        if (serverEvent.name === 'generate_pdf') {
+                            console.log("AIよりPDF生成！", serverEvent);
+                            const args = JSON.parse(serverEvent.arguments);
+                            updateStatus("AIの指示に基づき、ローカルでPDFレポートを構築中...", false);
+                            
+                            // バックエンドPDF生成Interfaceを呼び出し
+                            await triggerLocalPDFGeneration(args.title, args.content, serverEvent.call_id);
+                        }
+                    }
+                } catch (parseError) {
+                    console.error("イベント解析エラー:", parseError);
+                }
+            };
+        }
+
+        async function triggerLocalPDFGeneration(title, content, callId) {
+            try {
+                const response = await fetch('/api/generate-pdf', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title, content })
+                });
+
+                if (!response.ok) throw new Error("ローカルサーバーでのPDF生成に失敗しました");
+                const pdfData = await response.json();
+
+                const dcBox = document.getElementById('downloadCenter');
+                const dlBtn = document.getElementById('pdfDownloadBtn');
+                document.getElementById('pdfMeta').innerText = `ファイル名: ${pdfData.filename} (ローカルサーバーの公開ディレクトリに安全に保存されました)`;
+                dlBtn.href = pdfData.url;
+                dcBox.style.display = 'block';
+                updateStatus("通話中：レポートが下のダウンロードエリアにプッシュされました", true);
+
+                const toolResponseEvent = {
+                    type: "conversation.item.create",
+                    item: {
+                        type: "function_call_output",
+                        call_id: callId,
+                        output: JSON.stringify({ success: true, local_path: pdfData.url })
+                    }
+                };
+                dataChannel.send(JSON.stringify(toolResponseEvent));
+                dataChannel.send(JSON.stringify({ type: "response.create" }));
+
+            } catch (err) {
+                console.error("PDF生成プロセスの異常:", err);
+                updateStatus("通話中：PDF生成中にエラーが発生しました", true);
+            }
+        }
+
+        function sendTextMessage() {
+            const input = document.getElementById('textMsg');
+            if (!input.value.trim() || !dataChannel || dataChannel.readyState !== "open") return;
+            const textEvent = {
+                type: "conversation.item.create",
+                item: { type: "message", role: "user", content: [{ type: "input_text", text: input.value }] }
+            };
+            dataChannel.send(JSON.stringify(textEvent));
+            dataChannel.send(JSON.stringify({ type: "response.create" }));
+            input.value = "";
+        }
+
+        function updateStatus(text, isActive) {
+            const badge = document.getElementById('statusBadge');
+            badge.innerText = text;
+            if (isActive) badge.classList.add('active');
+            else badge.classList.remove('active');
+        }
+
+        function stopSession() {
+            if (peerConnection) peerConnection.close();
+            location.reload();
+        }
+    </script>
+</body>
+</html>
