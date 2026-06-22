@@ -1,6 +1,7 @@
 # openai-voice-agent
 
-<img width="1041" height="647" alt="image" src="https://github.com/user-attachments/assets/8973120c-8778-46dd-9b6b-2a23f0480dd0" />
+<img width="1000" height="590" alt="image" src="https://github.com/user-attachments/assets/bc86634b-0c82-48a5-a3ca-3126e71c313e" />
+
 
 # AI 音声アシスタント
 
